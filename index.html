@@ -336,9 +336,9 @@ loadTicker(); setInterval(loadTicker, 120000);
   }
   // основной источник — TonAPI, запасной — CoinGecko
   async function fromTonapi(){
-    const from = Math.floor(Date.now()/1000) - 86400;
+    const now = Math.floor(Date.now()/1000), from = now - 86400;
     const [c, r] = await Promise.all([
-      fetch(`https://tonapi.io/v2/rates/chart?token=ton&currency=usd&start_date=${from}&points_count=200`).then(x => x.json()),
+      fetch(`https://tonapi.io/v2/rates/chart?token=ton&currency=usd&start_date=${from}&end_date=${now}`).then(x => x.json()),
       fetch('https://tonapi.io/v2/rates?tokens=ton&currencies=usd').then(x => x.json())
     ]);
     const p = c.points.slice().sort((a,b) => a[0]-b[0]).map(x => x[1]);
