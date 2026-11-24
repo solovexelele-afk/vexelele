@@ -34,6 +34,13 @@ async function copy(text, msg) {
   catch (e) { const a = document.createElement('textarea'); a.value = text; document.body.append(a); a.select(); document.execCommand('copy'); a.remove(); }
   toast(msg || 'Скопировано ✓');
 }
+/* Копирование сид-фразы: через минуту пробуем очистить буфер обмена */
+let clipTimer;
+async function copySeed(words) {
+  await copy(words.join(' '), 'Фраза скопирована. Буфер очистится через минуту');
+  clearTimeout(clipTimer);
+  clipTimer = setTimeout(() => { navigator.clipboard?.writeText(' ').catch(() => {}); }, 60000);
+}
 async function get(path) {
   const r = await fetch(api() + path);
   if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -135,7 +142,11 @@ V.create = () => {
     <button class="btn primary" id="b-next" disabled>Я записал(а) все 24 слова</button>
   </div>`;
   $('#b-back').onclick = () => { S.newWords = null; render('welcome'); };
-  $('#b-show').onclick = () => { $('#words').classList.remove('blur'); $('#b-show').remove(); $('#b-next').disabled = false; };
+  $('#b-show').onclick = () => {
+    $('#words').classList.remove('blur'); $('#b-next').disabled = false;
+    $('#b-show').textContent = 'Скопировать фразу';
+    $('#b-show').onclick = () => copySeed(S.newWords);
+  };
   $('#b-next').onclick = () => render('confirm');
 };
 
@@ -361,7 +372,8 @@ V.confirmSend = () => {
       <div><span>Кому</span><span>${esc(d.to)}</span></div>
       <div><span>Сумма</span><span>${esc(d.amount)} TON${fiat}</span></div>
       ${d.comment ? `<div><span>Комментарий</span><span>${esc(d.comment)}</span></div>` : ''}
-      <div><span>Комиссия сети</span><span>≈ 0.005 TON</span></div>
+      <div><span>Комиссия сети</span><span id="fee">считаю…</span></div>
+      <div><span>Всего спишется</span><span id="total">—</span></div>
       <div><span>Сеть</span><span>${S.net}</span></div>
     </div>
     <div class="note">Переводы в блокчейне <b>нельзя отменить</b>. Проверь адрес ещё раз.</div>
@@ -370,6 +382,14 @@ V.confirmSend = () => {
     <button class="btn primary" id="b-go">Отправить ${esc(d.amount)} TON</button>
   </div>`;
   $('#b-back').onclick = () => render('send');
+  estimateFee(d).then(fee => {
+    if (S.view !== 'confirmSend') return;
+    const total = +d.amount + fee;
+    const uah = v => S.rate.uah ? ` (≈ ${fmt(v * S.rate.uah, 2)} ₴)` : '';
+    $('#fee').textContent = `${fmt(fee, 6)} TON${uah(fee)}`;
+    $('#total').textContent = `${fmt(total, 6)} TON${uah(total)}`;
+    if (total > S.balance) { $('#err').textContent = 'С учётом комиссии не хватает средств. Уменьши сумму.'; $('#b-go').disabled = true; }
+  }).catch(() => { if (S.view === 'confirmSend') { $('#fee').textContent = 'обычно 0.002–0.01 TON'; $('#total').textContent = `${esc(d.amount)} TON + комиссия`; } });
   $('#b-go').onclick = async () => {
     $('#b-go').disabled = true;
     try { await decryptWords($('#p').value); }
@@ -378,15 +398,39 @@ V.confirmSend = () => {
   };
 };
 
+async function getSeqno() {
+  try { return (await get(`/v2/wallet/${encodeURIComponent(S.raw)}/seqno`)).seqno || 0; }
+  catch (e) { if (String(e.message).includes('404')) return 0; throw e; }
+}
+
+/* Комиссия: перевод с пустой подписью прогоняется в эмуляторе TonAPI.
+   Настоящий ключ для этого не используется и никуда не уходит. */
+async function estimateFee(d) {
+  const seqno = await getSeqno();
+  const q = await S.wallet.methods.transfer({
+    secretKey: null, toAddress: d.to, amount: TW.utils.toNano(d.amount),
+    seqno, payload: d.comment || '', sendMode: 3
+  }).getQuery();
+  const boc = TW.utils.bytesToBase64(await q.toBoc(false));
+  const balance = Math.round(Math.max(S.balance, +d.amount + 1) * 1e9);
+  const r = await fetch(api() + '/v2/wallet/emulate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boc, params: [{ address: S.raw, balance }] })
+  });
+  if (!r.ok) throw new Error('emulate ' + r.status);
+  const j = await r.json();
+  const extra = Number(j.event?.extra);
+  if (!Number.isFinite(extra)) throw new Error('no fee');
+  return Math.max(0, -extra) / 1e9;
+}
+
 async function sendNow() {
   const d = S.draft;
   app.innerHTML = `<div class="view status"><div class="spin"></div><h2>Отправляю…</h2><p class="muted" id="st">Подписываю перевод</p></div>`;
   const st = m => { const el = document.getElementById('st'); if (el) el.textContent = m; };
   try {
     const raw = encodeURIComponent(S.raw);
-    let seqno = 0;
-    try { seqno = (await get(`/v2/wallet/${raw}/seqno`)).seqno || 0; }
-    catch (e) { if (!String(e.message).includes('404')) throw e; }
+    const seqno = await getSeqno();
     const tr = S.wallet.methods.transfer({
       secretKey: S.keyPair.secretKey, toAddress: d.to, amount: TW.utils.toNano(d.amount),
       seqno, payload: d.comment || '', sendMode: 3
@@ -438,7 +482,7 @@ V.phrase = () => {
   app.innerHTML = `<div class="view">
     <button class="back" id="b-back">← назад</button>
     <h2>Секретная фраза</h2>
-    <div class="note"><b>Убедись, что никто не смотрит на экран.</b> Не делай скриншот и никому не отправляй фразу. Поддержка никогда её не спрашивает.</div>
+    <div class="note"><b>Убедись, что никто не смотрит на экран.</b> Никому не отправляй фразу и не вставляй её на сайты. Поддержка никогда её не спрашивает. Если копируешь, вставь сразу в надёжное место.</div>
     <label class="field"><small class="lbl">Пароль</small><input type="password" id="p" autocomplete="current-password"></label>
     <div class="err" id="err"></div>
     <button class="btn primary" id="b-ok">Показать</button>
@@ -448,7 +492,9 @@ V.phrase = () => {
   $('#b-ok').onclick = async () => {
     try {
       const w = await decryptWords($('#p').value);
-      $('#out').innerHTML = `<div class="words">${w.map((x, i) => `<div><i>${i + 1}</i>${esc(x)}</div>`).join('')}</div>`;
+      $('#out').innerHTML = `<div class="words">${w.map((x, i) => `<div><i>${i + 1}</i>${esc(x)}</div>`).join('')}</div>
+        <button class="btn" id="b-copy" style="margin-top:12px">Скопировать фразу</button>`;
+      $('#b-copy').onclick = () => copySeed(w);
       $('#b-ok').remove(); $('#err').textContent = '';
       setTimeout(() => { if (S.view === 'phrase') render('settings'); }, 60000);
     } catch (e) { $('#err').textContent = 'Неверный пароль.'; }
