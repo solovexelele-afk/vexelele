@@ -260,9 +260,17 @@ function updateConv(){
   if (!tonUah) return;
   $('conv').innerHTML = `1 TON = <strong>${tonUah.toFixed(2)} ₴</strong>` + (uah() ? ` · ${uah().toLocaleString('ru')} ₴ ≈ <strong>${tonAmount()} TON</strong>` : '');
 }
-fetch('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=uah')
-  .then(r => r.json()).then(d => { tonUah = d['the-open-network'].uah; updateConv(); current && current.update(); })
-  .catch(() => $('conv').textContent = 'Курс TON недоступен, сумму в TON уточните в Telegram');
+async function loadRate(){
+  const sources = [
+    () => fetch('https://tonapi.io/v2/rates?tokens=ton&currencies=uah').then(r => r.json()).then(d => d.rates.TON.prices.UAH),
+    () => fetch('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=uah').then(r => r.json()).then(d => d['the-open-network'].uah)
+  ];
+  for (const s of sources) {
+    try { const v = await s(); if (v > 0) { tonUah = v; updateConv(); current && current.update(); return; } } catch(e) {}
+  }
+  if (!tonUah) $('conv').textContent = 'Курс TON недоступен, сумму в TON уточните в Telegram';
+}
+loadRate(); setInterval(loadRate, 60000);
 
 show(location.hash.slice(1));
 </script>

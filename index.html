@@ -34,8 +34,8 @@
 
   nav{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;padding:20px 5vw;font-family:var(--mono);font-size:14px;background:rgba(12,13,12,.8);backdrop-filter:blur(10px);border-bottom:1px solid transparent;transition:border-color .3s}
   nav.scrolled{border-bottom-color:var(--line)}
-  .soon{font-family:var(--mono);font-size:12px;color:var(--muted);border:1px solid var(--line);padding:4px 10px}
   div.proj::before{display:none}
+  div.proj:hover{background:var(--bg)}
   .proj::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--acc);transform:scaleY(0);transition:transform .3s;transform-origin:top}
   .proj:hover::before{transform:scaleY(1)}
   nav .logo{font-weight:600}
@@ -177,7 +177,7 @@
     <div class="term-foot">
       <div><small>мин 24ч</small><span id="lo">—</span></div>
       <div><small>макс 24ч</small><span id="hi">—</span></div>
-      <div><small>объём 24ч</small><span id="vol">—</span></div>
+      <div><small>за 24ч</small><span id="vol">—</span></div>
     </div>
   </div>
 </header>
@@ -199,7 +199,7 @@
       <div><h3>TON Market Intelligence</h3>
         <div class="chips"><span class="chip">Python</span><span class="chip">TON API</span><span class="chip">аналитика</span></div></div>
       <p>Собирает рыночные данные по TON, считает метрики и шлёт сигналы, пока остальные обновляют графики вручную.</p>
-      <span class="soon">скоро</span>
+      <span></span>
     </div>
     <a class="proj reveal" href="https://t.me/StarlifyShopBot" target="_blank" rel="noopener">
       <span class="idx">02</span>
@@ -334,21 +334,46 @@ loadTicker(); setInterval(loadTicker, 120000);
     const ch = document.getElementById('chg');
     ch.textContent = (pct>=0?'+':'') + pct.toFixed(2) + '%'; ch.className = pct>=0 ? 'up' : 'down';
   }
+  // основной источник — TonAPI, запасной — CoinGecko
+  async function fromTonapi(){
+    const from = Math.floor(Date.now()/1000) - 86400;
+    const [c, r] = await Promise.all([
+      fetch(`https://tonapi.io/v2/rates/chart?token=ton&currency=usd&start_date=${from}&points_count=200`).then(x => x.json()),
+      fetch('https://tonapi.io/v2/rates?tokens=ton&currencies=usd').then(x => x.json())
+    ]);
+    const p = c.points.slice().sort((a,b) => a[0]-b[0]).map(x => x[1]);
+    p.push(r.rates.TON.prices.USD);
+    return p;
+  }
+  async function fromCoingecko(){
+    const d = await fetch(`${CG}/coins/the-open-network/market_chart?vs_currency=usd&days=1`).then(x => x.json());
+    return d.prices.map(x => x[1]);
+  }
+  function apply(p){
+    pts = p; start = p[0];
+    document.getElementById('lo').textContent = '$' + Math.min(...p).toFixed(3);
+    document.getElementById('hi').textContent = '$' + Math.max(...p).toFixed(3);
+    const ch = (p.at(-1)/p[0]-1)*100, el = document.getElementById('vol');
+    el.textContent = (ch>=0?'+':'') + ch.toFixed(2) + '%'; el.className = ch>=0 ? 'up' : 'down';
+    draw();
+  }
   async function load(){
-    try {
-      const r = await fetch(`${CG}/coins/the-open-network/market_chart?vs_currency=usd&days=1`);
-      const d = await r.json();
-      pts = d.prices.map(p => p[1]); start = pts[0];
-      const vol = d.total_volumes.at(-1)[1];
-      document.getElementById('lo').textContent = '$' + Math.min(...pts).toFixed(3);
-      document.getElementById('hi').textContent = '$' + Math.max(...pts).toFixed(3);
-      document.getElementById('vol').textContent = '$' + (vol/1e6).toFixed(1) + 'M';
-      document.getElementById('live').textContent = 'live';
-      draw();
-    } catch(e) { document.getElementById('live').textContent = 'нет связи'; }
+    for (const src of [fromTonapi, fromCoingecko]) {
+      try {
+        const p = await src();
+        if (p.length > 2 && p.every(Number.isFinite)) {
+          apply(p);
+          document.getElementById('live').textContent = 'live';
+          try { localStorage.setItem('ton-chart', JSON.stringify(p)); } catch(e){}
+          return;
+        }
+      } catch(e) {}
+    }
+    try { const c = JSON.parse(localStorage.getItem('ton-chart')); if (c) { apply(c); document.getElementById('live').textContent = 'кэш'; return; } } catch(e){}
+    document.getElementById('live').textContent = 'нет связи';
   }
   size(); load(); addEventListener('resize', () => { size(); draw(); });
-  setInterval(load, 120000);
+  setInterval(load, 60000);
 })();
 
 /* reveal + counters + bars */
