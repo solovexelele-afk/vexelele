@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Оплата</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;800&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<style>
+  :root{--bg:#0c0d0c;--panel:#131513;--line:#262a26;--text:#e9ece6;--muted:#8b928a;--acc:#c6f432;--up:#3ddc84;
+    --mono:'JetBrains Mono',ui-monospace,monospace;--display:'Unbounded',sans-serif;--sans:'Inter',system-ui,sans-serif}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.55;min-height:100vh;overflow-x:hidden}
+  a{color:inherit;text-decoration:none}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+  ::selection{background:var(--acc);color:#000}
+  #grid{position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:56px 56px;opacity:.35;
+    -webkit-mask-image:radial-gradient(420px circle at var(--mx,70%) var(--my,30%),#000,transparent 70%);
+            mask-image:radial-gradient(420px circle at var(--mx,70%) var(--my,30%),#000,transparent 70%)}
+
+  nav{position:sticky;top:0;z-index:10;display:flex;justify-content:space-between;align-items:center;padding:20px 5vw;font-family:var(--mono);font-size:14px;border-bottom:1px solid var(--line);background:rgba(12,13,12,.8);backdrop-filter:blur(10px)}
+  nav .logo i{color:var(--acc);font-style:normal}
+  nav a.back{color:var(--muted)} nav a.back:hover{color:var(--acc)}
+
+  main{padding:8vh 5vw 10vh;max-width:1400px;margin:0 auto}
+  .top{display:grid;grid-template-columns:1.2fr 1fr;gap:5vw;align-items:end}
+  .tag{font-family:var(--mono);font-size:13px;color:var(--acc);margin-bottom:22px;display:flex;align-items:center;gap:10px}
+  .tag::before{content:"";width:8px;height:8px;background:var(--acc)}
+  h1{font-family:var(--display);font-weight:800;font-size:clamp(44px,7vw,100px);line-height:.92;letter-spacing:-.02em}
+  h1 span{color:var(--acc)}
+
+  /* amount */
+  .amount{border:1px solid var(--line);background:var(--panel);padding:22px}
+  .amount label{font-family:var(--mono);font-size:12px;color:var(--muted);display:block;margin-bottom:8px}
+  .amount-row{display:flex;align-items:baseline;gap:10px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  .amount input{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--text);font-family:var(--display);font-size:44px;font-weight:500}
+  .amount input::placeholder{color:#3a3f3a}
+  .amount-row b{font-family:var(--display);font-size:30px;font-weight:500;color:var(--muted)}
+  .presets{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+  .presets button{font-family:var(--mono);font-size:13px;border:1px solid var(--line);padding:7px 12px;transition:.15s}
+  .presets button:hover{border-color:var(--acc);color:var(--acc)}
+  .conv{margin-top:14px;font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .conv strong{color:var(--text);font-weight:600}
+
+  /* tabs */
+  .tabs{margin-top:60px;display:flex;border:1px solid var(--line);width:max-content;max-width:100%;overflow-x:auto}
+  .tab{font-family:var(--mono);font-size:14px;padding:14px 26px;border-right:1px solid var(--line);color:var(--muted);transition:.2s;white-space:nowrap}
+  .tab:last-child{border-right:0}
+  .tab:hover{color:var(--text)}
+  .tab.on{background:var(--acc);color:#000;font-weight:600}
+
+  .stage{border:1px solid var(--line);border-top:0;display:grid;grid-template-columns:1fr 1fr;min-height:440px}
+  .visual{display:grid;place-items:center;padding:50px 30px;border-right:1px solid var(--line);perspective:1000px;background:radial-gradient(circle at 50% 50%,#161916,transparent 70%)}
+  .info{padding:44px 40px;display:flex;flex-direction:column;gap:26px}
+  .info small{font-family:var(--mono);font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+  .info h2{font-family:var(--display);font-weight:500;font-size:34px;line-height:1.05}
+  .info p{color:var(--muted)}
+  .field{border:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;cursor:pointer;transition:.2s}
+  .field:hover{border-color:var(--acc)}
+  .field code{font-family:var(--mono);font-size:18px;word-break:break-all}
+  .field span{font-family:var(--mono);font-size:12px;color:var(--acc);white-space:nowrap}
+  .btns{display:flex;gap:10px;flex-wrap:wrap}
+  .btn{font-family:var(--mono);font-size:14px;padding:15px 22px;border:1px solid var(--line);transition:.2s;text-align:center}
+  .btn.primary{background:var(--acc);color:#000;border-color:var(--acc);font-weight:600}
+  .btn.primary:hover{transform:translate(-3px,-3px);box-shadow:3px 3px 0 var(--text)}
+  .btn:not(.primary):hover{border-color:var(--text)}
+
+  /* bank card */
+  .card{width:min(400px,100%);aspect-ratio:1.586;border-radius:18px;padding:26px;position:relative;overflow:hidden;
+    display:flex;flex-direction:column;justify-content:space-between;cursor:pointer;
+    transform-style:preserve-3d;transition:transform .15s ease-out;box-shadow:0 30px 60px -20px rgba(0,0,0,.8)}
+  .card::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at var(--gx,30%) var(--gy,20%),rgba(255,255,255,.22),transparent 45%);pointer-events:none}
+  .card.mono{background:linear-gradient(135deg,#1b1b1b,#050505);border:1px solid #2c2c2c}
+  .card.privat{background:linear-gradient(135deg,#7bbf3a,#2f7d1f)}
+  .card .row{display:flex;justify-content:space-between;align-items:center}
+  .card .bank{font-family:var(--display);font-weight:500;font-size:20px}
+  .chip-ic{width:46px;height:34px;border-radius:6px;background:linear-gradient(135deg,#e8d48a,#a88b3d);position:relative}
+  .chip-ic::before{content:"";position:absolute;inset:8px 0;border-top:1px solid rgba(0,0,0,.25);border-bottom:1px solid rgba(0,0,0,.25)}
+  .card .num{font-family:var(--mono);font-size:clamp(17px,2.2vw,24px);letter-spacing:.08em;text-shadow:0 1px 2px rgba(0,0,0,.4)}
+  .card .who{font-family:var(--mono);font-size:12px;opacity:.75;text-transform:uppercase;letter-spacing:.1em}
+  .visa{font-family:var(--display);font-style:italic;font-weight:800;font-size:22px}
+
+  /* qr */
+  .qr-wrap{background:#fff;padding:18px;width:min(300px,100%);position:relative}
+  .qr-wrap svg{display:block;width:100%;height:auto}
+  .qr-logo{position:absolute;left:50%;top:50%;width:54px;height:54px;transform:translate(-50%,-50%);background:#0098ea;border:5px solid #fff;border-radius:50%;display:grid;place-items:center}
+  .qr-cap{text-align:center;margin-top:14px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+
+  .steps{margin-top:70px;display:grid;grid-template-columns:repeat(3,1fr);gap:24px;counter-reset:s}
+  .steps div{border-top:1px solid var(--line);padding-top:18px;color:var(--muted)}
+  .steps div::before{counter-increment:s;content:"0" counter(s);display:block;font-family:var(--mono);color:var(--acc);margin-bottom:8px}
+  .steps a{color:var(--text);border-bottom:1px solid var(--acc)}
+
+  .toast{position:fixed;left:50%;bottom:30px;transform:translate(-50%,120px);background:var(--acc);color:#000;font-family:var(--mono);font-weight:600;font-size:14px;padding:14px 22px;transition:transform .3s cubic-bezier(.2,.9,.3,1.3);z-index:50}
+  .toast.show{transform:translate(-50%,0)}
+  footer{padding:30px 5vw;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .fade{animation:fade .35s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(10px)}}
+
+  @media (max-width:900px){
+    .top,.stage,.steps{grid-template-columns:1fr}
+    .visual{border-right:0;border-bottom:1px solid var(--line)}
+    .info{padding:30px 22px}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div id="grid"></div>
+<nav>
+  <a href="index.html" class="logo"><i>~/</i><span data-cfg="handle"></span></a>
+  <a href="index.html" class="back">← на главную</a>
+</nav>
+
+<main>
+  <div class="top">
+    <div>
+      <h1>Оплата<br>в пару <span>кликов</span>.</h1>
+    </div>
+    <div class="amount">
+      <label for="amt">Сумма (как договорились в Telegram)</label>
+      <div class="amount-row"><input id="amt" type="number" min="0" inputmode="decimal" placeholder="0"><b>₴</b></div>
+      <div class="presets"><button data-v="200">200</button><button data-v="500">500</button><button data-v="1000">1000</button><button data-v="2500">2500</button></div>
+      <div class="conv" id="conv">Курс TON загружается…</div>
+    </div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div class="stage" id="stage"></div>
+
+  <div class="steps">
+    <div>Договариваемся о заказе и сумме в <a class="tg" href="#">Telegram</a>.</div>
+    <div>Переводите на карту или в TON. Номер копируется в один клик.</div>
+    <div>Присылаете скрин оплаты в <a class="tg" href="#">Telegram</a>, я подтверждаю заказ.</div>
+  </div>
+</main>
+
+<footer>© <span id="year"></span> <span data-cfg="handle"></span></footer>
+<div class="toast" id="toast">Скопировано ✓</div>
+
+<script src="config.js"></script>
+<script>
+document.querySelectorAll('[data-cfg]').forEach(el => el.textContent = CONFIG[el.dataset.cfg]);
+document.querySelectorAll('.tg').forEach(a => a.href = CONFIG.telegram);
+document.title = 'Оплата — ' + CONFIG.handle;
+document.getElementById('year').textContent = new Date().getFullYear();
+addEventListener('pointermove', e => {
+  document.documentElement.style.setProperty('--mx', e.clientX + 'px');
+  document.documentElement.style.setProperty('--my', e.clientY + 'px');
+});
+
+const P = CONFIG.pay, $ = id => document.getElementById(id);
+const amt = $('amt');
+let tonUah = 0, current = null;
+
+/* copy + toast */
+let tt;
+async function copy(text, msg){
+  try { await navigator.clipboard.writeText(text); } catch(e){
+    const t = document.createElement('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  const el = $('toast'); el.textContent = msg || 'Скопировано ✓'; el.classList.add('show');
+  clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 1600);
+}
+
+const fmtCard = n => n.replace(/\D/g,'').replace(/(.{4})/g,'$1 ').trim();
+const shortAddr = a => a.slice(0,8) + '…' + a.slice(-8);
+const uah = () => parseFloat(amt.value) || 0;
+const tonAmount = () => tonUah ? +(uah() / tonUah).toFixed(3) : 0;
+
+/* methods */
+const METHODS = [
+  P.mono && { id:'mono', tab:'monobank', render: () => cardView('mono','monobank',P.mono) },
+  P.privat && { id:'privat', tab:'ПриватБанк', render: () => cardView('privat','ПриватБанк',P.privat) },
+  P.ton && { id:'ton', tab:'TON', render: tonView },
+  P.funpay && { id:'funpay', tab:'FunPay', render: funpayView }
+].filter(Boolean);
+
+function cardView(cls, bank, num){
+  return {
+    visual: `<div class="card ${cls}" id="bank-card" title="Нажмите, чтобы скопировать">
+        <div class="row"><span class="bank">${bank}</span><span class="visa">VISA</span></div>
+        <div class="chip-ic"></div>
+        <div><div class="num">${fmtCard(num)}</div><div class="row" style="margin-top:12px"><span class="who">${CONFIG.handle}</span><span class="who">UAH</span></div></div>
+      </div>`,
+    info: `<div><small>перевод на карту</small><h2>${bank}</h2></div>
+      <p>Переведите <strong id="sum-line" style="color:var(--text)"></strong>на карту через приложение любого банка. Нажмите на номер, и он скопируется.</p>
+      <div class="field" data-copy="${num}"><code>${fmtCard(num)}</code><span>копировать</span></div>
+      <div class="btns"><button class="btn primary" data-copy="${num}">Скопировать номер</button><a class="btn tg-btn" target="_blank" rel="noopener" href="${CONFIG.telegram}">Отправить скрин →</a></div>`,
+    after(){
+      const c = $('bank-card');
+      c.onclick = () => copy(num, 'Номер карты скопирован ✓');
+      c.onpointermove = e => {
+        const r = c.getBoundingClientRect(), x = (e.clientX - r.left)/r.width, y = (e.clientY - r.top)/r.height;
+        c.style.transform = `rotateY(${(x-.5)*18}deg) rotateX(${(.5-y)*18}deg)`;
+        c.style.setProperty('--gx', x*100+'%'); c.style.setProperty('--gy', y*100+'%');
+      };
+      c.onpointerleave = () => c.style.transform = '';
+    },
+    update(){ const s = $('sum-line'); if (s) s.textContent = uah() ? uah().toLocaleString('ru') + ' ₴ ' : ''; }
+  };
+}
+
+function tonView(){
+  return {
+    visual: `<div><div class="qr-wrap" id="qr"></div><div class="qr-cap">Наведите камеру или Tonkeeper</div></div>`,
+    info: `<div><small>криптовалюта</small><h2>TON</h2></div>
+      <p id="ton-line">Отсканируйте QR в Tonkeeper или другом TON-кошельке. Сумма подставится автоматически.</p>
+      <div class="field" data-copy="${P.ton}"><code>${shortAddr(P.ton)}</code><span>копировать адрес</span></div>
+      <div class="btns"><a class="btn primary" id="ton-open" target="_blank" rel="noopener">Открыть в Tonkeeper</a><a class="btn" id="ton-deeplink">Другой кошелёк</a></div>`,
+    after(){},
+    update(){
+      const a = tonAmount(), nano = a ? '?amount=' + Math.round(a*1e9) : '';
+      const link = `ton://transfer/${P.ton}${nano}`;
+      $('ton-open').href = `https://app.tonkeeper.com/transfer/${P.ton}${nano}`;
+      $('ton-deeplink').href = link;
+      $('ton-line').innerHTML = a
+        ? `К оплате: <strong style="color:var(--text)">${a} TON</strong> (≈ ${uah().toLocaleString('ru')} ₴). Отсканируйте QR, сумма уже внутри.`
+        : 'Отсканируйте QR в Tonkeeper или другом TON-кошельке. Введите сумму выше, и она попадёт в QR.';
+      if (window.qrcode) {
+        const q = qrcode(0,'H'); q.addData(link); q.make();
+        $('qr').innerHTML = q.createSvgTag({cellSize:8, margin:0, scalable:true}) +
+          `<div class="qr-logo"><svg width="24" height="24" viewBox="0 0 56 56"><path fill="#fff" d="M37.6 15.6H18.4c-3.5 0-5.8 3.8-4 6.9l11.8 20.5c.8 1.3 2.7 1.3 3.5 0l11.8-20.5c1.8-3.1-.4-6.9-3.9-6.9zM26.3 36.8l-2.6-5-6.2-11.1c-.4-.7.1-1.6 1-1.6h7.8v17.7zm12.2-16.2l-6.2 11.1-2.6 5V19.1h7.8c.9 0 1.4.9 1 1.5z"/></svg></div>`;
+      }
+    }
+  };
+}
+
+function funpayView(){
+  return {
+    visual: `<div class="qr-wrap" id="qr"></div>`,
+    info: `<div><small>маркетплейс</small><h2>FunPay</h2></div>
+      <p>Оформите заказ на моём профиле FunPay. Деньги защищены площадкой до выполнения заказа.</p>
+      <div class="btns"><a class="btn primary" href="${P.funpay}" target="_blank" rel="noopener">Открыть FunPay →</a><button class="btn" data-copy="${P.funpay}">Копировать ссылку</button></div>`,
+    after(){ if (window.qrcode){ const q = qrcode(0,'M'); q.addData(P.funpay); q.make(); $('qr').innerHTML = q.createSvgTag({cellSize:8,margin:0,scalable:true}); } },
+    update(){}
+  };
+}
+
+function show(id){
+  const m = METHODS.find(x => x.id === id) || METHODS[0];
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.id === m.id));
+  current = m.render();
+  $('stage').innerHTML = `<div class="visual fade">${current.visual}</div><div class="info fade">${current.info}</div>`;
+  $('stage').querySelectorAll('[data-copy]').forEach(b => b.onclick = () => copy(b.dataset.copy));
+  current.after(); current.update();
+  history.replaceState(null, '', '#' + m.id);
+}
+
+$('tabs').innerHTML = METHODS.map(m => `<button class="tab" data-id="${m.id}">${m.tab}</button>`).join('');
+$('tabs').onclick = e => { const t = e.target.closest('.tab'); if (t) show(t.dataset.id); };
+
+amt.oninput = () => { updateConv(); current && current.update(); };
+document.querySelectorAll('.presets button').forEach(b => b.onclick = () => { amt.value = b.dataset.v; amt.oninput(); });
+
+function updateConv(){
+  if (!tonUah) return;
+  $('conv').innerHTML = `1 TON = <strong>${tonUah.toFixed(2)} ₴</strong>` + (uah() ? ` · ${uah().toLocaleString('ru')} ₴ ≈ <strong>${tonAmount()} TON</strong>` : '');
+}
+fetch('https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=uah')
+  .then(r => r.json()).then(d => { tonUah = d['the-open-network'].uah; updateConv(); current && current.update(); })
+  .catch(() => $('conv').textContent = 'Курс TON недоступен, сумму в TON уточните в Telegram');
+
+show(location.hash.slice(1));
+</script>
+<script src="fx.js"></script>
+</body>
+</html>
