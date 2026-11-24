@@ -11,8 +11,10 @@ const S = {
   net: (() => { try { return localStorage.getItem(NET) || 'mainnet'; } catch (e) { return 'mainnet'; } })(),
   keyPair: null, wallet: null, raw: '', addr: '',
   balance: 0, rate: { usd: 0, uah: 0 }, jettons: [], events: [], tab: 'tokens',
-  draft: null, newWords: null
+  draft: null, newWords: null, nfts: [], change24: null, updated: 0,
+  hide: (() => { try { return localStorage.getItem('vxw-hide') === '1'; } catch (e) { return false; } })()
 };
+const VERSIONS = ['v4R2', 'v3R2'];
 
 /* ---------- helpers ---------- */
 const $ = s => app.querySelector(s);
@@ -41,8 +43,17 @@ async function copySeed(words) {
   clearTimeout(clipTimer);
   clipTimer = setTimeout(() => { navigator.clipboard?.writeText(' ').catch(() => {}); }, 60000);
 }
+/* TonAPI без ключа пускает ~1 запрос в секунду: на 429 ждём и повторяем */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function fetchRetry(url, opts) {
+  for (let i = 0; ; i++) {
+    const r = await fetch(url, opts);
+    if (r.status !== 429 || i >= 4) return r;
+    await sleep(1100 * (i + 1));
+  }
+}
 async function get(path) {
-  const r = await fetch(api() + path);
+  const r = await fetchRetry(api() + path);
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
 }
@@ -68,9 +79,11 @@ async function decryptWords(pass) {
 }
 
 /* ---------- wallet ---------- */
-async function openWallet(words) {
+async function openWallet(words, ver) {
+  ver = VERSIONS.includes(ver) ? ver : (loadStore()?.ver || 'v4R2');
   const kp = await MN.mnemonicToKeyPair(words);
-  const w = new TW.Wallets.all.v4R2(new TW.HttpProvider(), { publicKey: kp.publicKey, wc: 0 });
+  const w = new TW.Wallets.all[ver](new TW.HttpProvider(), { publicKey: kp.publicKey, wc: 0 });
+  S.ver = ver;
   const a = await w.getAddress();
   S.keyPair = kp; S.wallet = w; S.addrObj = a;
   setAddr();
@@ -81,7 +94,7 @@ function setAddr() {
 }
 function lock() {
   if (S.keyPair) { S.keyPair.secretKey.fill(0); }
-  S.keyPair = null; S.wallet = null; S.balance = 0; S.jettons = []; S.events = [];
+  S.keyPair = null; S.wallet = null; S.balance = 0; S.jettons = []; S.events = []; S.nfts = []; S.loaded = false;
   render('unlock');
 }
 let idle;
@@ -91,20 +104,45 @@ function bumpIdle() { clearTimeout(idle); if (S.keyPair) idle = setTimeout(() =>
 async function refresh() {
   if (!S.raw) return;
   const raw = encodeURIComponent(S.raw);
-  const [acc, jet, ev, rate] = await Promise.allSettled([
-    get(`/v2/accounts/${raw}`),
-    get(`/v2/accounts/${raw}/jettons?currencies=usd`),
-    get(`/v2/accounts/${raw}/events?limit=30`),
-    S.net === 'mainnet' ? fetch('https://tonapi.io/v2/rates?tokens=ton&currencies=usd,uah').then(r => r.json()) : Promise.reject()
-  ]);
+  if (S.refreshing) return; S.refreshing = true;
+  // по очереди, самое важное первым — так не упираемся в лимит TonAPI
+  const settle = p => p.then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
+  const acc = await settle(get(`/v2/accounts/${raw}`));
+  const jet = await settle(get(`/v2/accounts/${raw}/jettons?currencies=usd`));
+  const ev = await settle(get(`/v2/accounts/${raw}/events?limit=40`));
+  const rate = S.net === 'mainnet' && Date.now() - (S.rateAt || 0) > 60000
+    ? await settle(fetchRetry('https://tonapi.io/v2/rates?tokens=ton&currencies=usd,uah').then(r => r.ok ? r.json() : Promise.reject(r.status)))
+    : { status: 'skip' };
+  const nft = await settle(get(`/v2/accounts/${raw}/nfts?limit=60&indirect_ownership=false`));
+  S.refreshing = false;
+  if (nft.status === 'fulfilled') S.nfts = (nft.value.nft_items || []).filter(n => n.trust !== 'blacklist');
   if (acc.status === 'fulfilled') { S.balance = Number(acc.value.balance) / 1e9; S.status = acc.value.status; }
-  if (jet.status === 'fulfilled') S.jettons = (jet.value.balances || []).filter(j => j.balance !== '0');
+  if (jet.status === 'fulfilled') S.jettons = (jet.value.balances || []).filter(j => j.balance !== '0' && j.jetton?.verification !== 'blacklist');
   // спам-переводы с «наградами» и ссылками прячем
   if (ev.status === 'fulfilled') S.events = (ev.value.events || []).filter(e => !e.is_scam && !(e.actions || []).some(a => (a.TonTransfer || a.JettonTransfer || {}).sender?.is_scam));
-  if (rate.status === 'fulfilled') { const p = rate.value.rates.TON.prices; S.rate = { usd: p.USD, uah: p.UAH }; }
-  else if (S.net === 'testnet') S.rate = { usd: 0, uah: 0 };
-  S.loaded = true;
+  if (rate.status === 'fulfilled' && rate.value?.rates?.TON?.prices) {
+    const t = rate.value.rates.TON; S.rate = { usd: t.prices.USD, uah: t.prices.UAH }; S.rateAt = Date.now();
+    const ch = parseFloat(String(t.diff_24h?.USD || '').replace('−', '-').replace('%', ''));
+    S.change24 = Number.isFinite(ch) ? ch : null;
+  }
+  else if (S.net === 'testnet') { S.rate = { usd: 0, uah: 0 }; S.change24 = null; }
+  S.loaded = true; S.updated = Date.now();
   if (S.view === 'home') renderHome();
+}
+
+/* При импорте смотрим, на какой версии кошелька лежат деньги */
+async function detectVersion(words) {
+  try {
+    const kp = await MN.mnemonicToKeyPair(words);
+    const found = await Promise.all(VERSIONS.map(async v => {
+      const a = await new TW.Wallets.all[v](new TW.HttpProvider(), { publicKey: kp.publicKey, wc: 0 }).getAddress();
+      try { const acc = await get(`/v2/accounts/${encodeURIComponent(a.toString(false))}`); return { v, bal: Number(acc.balance), active: acc.status === 'active' }; }
+      catch (e) { return { v, bal: 0, active: false }; }
+    }));
+    kp.secretKey.fill(0);
+    found.sort((a, b) => (b.active - a.active) || (b.bal - a.bal));
+    return found[0].active || found[0].bal > 0 ? found[0].v : 'v4R2';
+  } catch (e) { return 'v4R2'; }
 }
 
 /* ---------- views ---------- */
@@ -166,7 +204,7 @@ V.confirm = () => {
   $('#b-ok').onclick = () => {
     const ok = [...app.querySelectorAll('input[data-i]')].every(inp => inp.value.trim().toLowerCase() === S.newWords[+inp.dataset.i]);
     if (!ok) { $('#err').textContent = 'Слова не совпадают. Проверь, что записал(а) фразу правильно.'; return; }
-    render('setpass', S.newWords);
+    render('setpass', { words: S.newWords, ver: 'v4R2' });
   };
 };
 
@@ -178,18 +216,22 @@ V.import = () => {
     <label class="field"><small class="lbl">Секретная фраза</small><textarea id="words" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="word1 word2 … word24"></textarea></label>
     <div class="err" id="err"></div>
     <button class="btn primary" id="b-ok">Продолжить</button>
+    <p class="muted" style="font-size:13px">Поддерживаются кошельки версий v4R2 и v3R2 (Tonkeeper, Tonhub, MyTonWallet до 2024 года). Кошельки W5 пока не поддерживаются.</p>
   </div>`;
   $('#b-back').onclick = () => render('welcome');
   $('#b-ok').onclick = async () => {
     const words = $('#words').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (words.length !== 24) { $('#err').textContent = `Нужно 24 слова, сейчас ${words.length}.`; return; }
     if (!(await MN.validateMnemonic(words))) { $('#err').textContent = 'Фраза не подходит. Проверь слова и их порядок.'; return; }
+    $('#b-ok').disabled = true; $('#b-ok').textContent = 'Ищу кошелёк…';
     $('#words').value = '';
-    render('setpass', words);
+    const ver = await detectVersion(words);
+    render('setpass', { words, ver });
   };
 };
 
-V.setpass = words => {
+V.setpass = arg => {
+  const words = Array.isArray(arg) ? arg : arg.words, ver = Array.isArray(arg) ? 'v4R2' : arg.ver;
   app.innerHTML = `<div class="view">
     <h2>Пароль</h2>
     <p class="muted">Пароль защищает фразу в этом браузере. Он понадобится, чтобы открыть кошелёк и подтвердить перевод.</p>
@@ -204,8 +246,8 @@ V.setpass = words => {
     if (p1 !== p2) { $('#err').textContent = 'Пароли не совпадают.'; return; }
     $('#b-ok').disabled = true; $('#b-ok').textContent = 'Шифрую…';
     const enc = await encryptWords(words, p1);
-    await openWallet(words);
-    enc.pub = TW.utils.bytesToHex(S.keyPair.publicKey);
+    await openWallet(words, ver);
+    enc.pub = TW.utils.bytesToHex(S.keyPair.publicKey); enc.ver = ver;
     try { localStorage.setItem(STORE, JSON.stringify(enc)); }
     catch (e) { $('#err').textContent = 'Браузер не даёт сохранить данные (приватный режим?).'; return; }
     words.fill(''); S.newWords = null;
@@ -251,50 +293,87 @@ V.reset = () => {
   };
 };
 
+const hid = s => S.hide ? '••••' : s;
+function portfolio() {
+  let usd = S.balance * (S.rate.usd || 0);
+  for (const j of S.jettons) { const p = j.price?.prices?.USD; if (p) usd += Number(j.balance) / 10 ** (j.jetton.decimals ?? 9) * p; }
+  return { usd, uah: S.rate.usd ? usd / S.rate.usd * S.rate.uah : 0 };
+}
+function agoText() {
+  if (!S.updated) return '';
+  const s = Math.round((Date.now() - S.updated) / 1000);
+  return s < 10 ? 'только что' : s < 60 ? `${s} сек назад` : `${Math.round(s / 60)} мин назад`;
+}
+
 function renderHome() {
-  const fiat = S.rate.uah ? `≈ ${fmt(S.balance * S.rate.uah, 2)} ₴ · $${fmt(S.balance * S.rate.usd, 2)}` : (S.net === 'testnet' ? 'тестовые TON, без стоимости' : '');
+  const pf = portfolio(), test = S.net === 'testnet';
+  const big = !S.loaded ? '…' : test || !pf.uah ? `${fmt(S.balance)}<span>TON</span>` : `${fmt(pf.uah, 2)}<span>₴</span>`;
+  const sub = !S.loaded ? '' : test ? 'тестовые TON, без стоимости' : `${fmt(S.balance)} TON · $${fmt(pf.usd, 2)}`;
+  const ch = S.change24 != null && !test ? `<span class="pill ${S.change24 >= 0 ? 'plus' : 'minus'}">TON ${S.change24 >= 0 ? '+' : ''}${fmt(S.change24, 2)}% за 24ч</span>` : '';
   app.innerHTML = `<div class="view">
     <div class="balance">
-      <small class="lbl">Баланс</small>
-      <div class="amt">${S.loaded ? fmt(S.balance) : '…'}<span>TON</span></div>
-      <div class="fiat">${fiat}</div>
-      <button class="addr-chip" id="b-addr">${esc(short(S.addr))} <span>⧉</span></button>
+      <div class="bal-top"><small class="lbl">Всего на кошельке</small>
+        <span class="bal-tools"><button id="b-hide" title="${S.hide ? 'Показать баланс' : 'Скрыть баланс'}">${S.hide ? '◡' : '◉'}</button><button id="b-ref" title="Обновить">⟳</button></span></div>
+      <div class="amt">${S.hide && S.loaded ? '••••' : big}</div>
+      <div class="fiat">${hid(sub)} ${ch}</div>
+      <div class="bal-foot"><button class="addr-chip" id="b-addr">${esc(short(S.addr))} <span>⧉</span></button><small class="muted" id="ago">${agoText()}</small></div>
     </div>
     <div class="actions">
       <button class="act" id="b-send"><b>↑</b>Отправить</button>
       <button class="act" id="b-recv"><b>↓</b>Получить</button>
       <button class="act" id="b-set"><b>⚙</b>Настройки</button>
     </div>
-    <div class="tabs"><button data-t="tokens" class="${S.tab === 'tokens' ? 'on' : ''}">Активы</button><button data-t="history" class="${S.tab === 'history' ? 'on' : ''}">История</button></div>
+    <div class="tabs">${[['tokens', 'Активы'], ['nft', `NFT${S.nfts.length ? ' · ' + S.nfts.length : ''}`], ['history', 'История']]
+      .map(([t, n]) => `<button data-t="${t}" class="${S.tab === t ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="list" id="list"></div>
   </div>`;
   $('#b-addr').onclick = () => copy(S.addr, 'Адрес скопирован ✓');
   $('#b-send').onclick = () => { S.draft = null; render('send'); };
   $('#b-recv').onclick = () => render('receive');
   $('#b-set').onclick = () => render('settings');
+  $('#b-hide').onclick = () => { S.hide = !S.hide; try { localStorage.setItem('vxw-hide', S.hide ? '1' : '0'); } catch (e) {} renderHome(); };
+  $('#b-ref').onclick = async e => { e.currentTarget.classList.add('spinning'); await refresh(); };
   app.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; renderHome(); });
-  $('#list').innerHTML = S.tab === 'tokens' ? tokensHtml() : historyHtml();
+  $('#list').innerHTML = S.tab === 'tokens' ? tokensHtml() : S.tab === 'nft' ? nftHtml() : historyHtml();
   app.querySelectorAll('.item.tap').forEach(el => el.onclick = () => { S.draft = null; render('send', el.dataset.asset); });
+  app.querySelectorAll('.item.ev').forEach(el => el.onclick = () => render('tx', S.events[+el.dataset.i]));
 }
 V.home = renderHome;
+setInterval(() => { const a = document.getElementById('ago'); if (a) a.textContent = agoText(); }, 5000);
 
 function tokensHtml() {
-  const ton = `<div class="item tap" data-asset="TON"><div class="ico" style="background:#0098ea">◆</div><div class="mid"><b>Toncoin</b><small>TON</small></div>
-    <div class="right">${fmt(S.balance)}<small>${S.rate.usd ? '$' + fmt(S.balance * S.rate.usd, 2) : ''}</small></div></div>`;
+  const tonUsd = S.balance * (S.rate.usd || 0);
+  const ton = `<div class="item tap" data-asset="TON"><div class="ico" style="background:#0098ea;color:#fff">◆</div>
+    <div class="mid"><b>Toncoin</b><small>${S.rate.usd ? '$' + fmt(S.rate.usd, 3) : 'TON'}${S.change24 != null && S.net === 'mainnet' ? ` <span class="${S.change24 >= 0 ? 'plus' : 'minus'}">${S.change24 >= 0 ? '+' : ''}${fmt(S.change24, 2)}%</span>` : ''}</small></div>
+    <div class="right">${hid(fmt(S.balance))} TON<small>${tonUsd ? hid('$' + fmt(tonUsd, 2)) : ''}</small></div></div>`;
   const js = S.jettons.map(j => {
     const d = j.jetton.decimals ?? 9, amt = Number(j.balance) / 10 ** d, usd = j.price?.prices?.USD;
     const img = safeImg(j.jetton.image);
     return `<div class="item tap" data-asset="${esc(j.jetton.address)}"><div class="ico">${img ? `<img src="${img}" alt="" loading="lazy">` : esc((j.jetton.symbol || '?')[0])}</div>
-      <div class="mid"><b>${esc(j.jetton.name)}</b><small>${esc(j.jetton.symbol)}</small></div>
-      <div class="right">${fmt(amt)}<small>${usd ? '$' + fmt(amt * usd, 2) : ''}</small></div></div>`;
+      <div class="mid"><b>${esc(j.jetton.name)}${j.jetton.verification === 'whitelist' ? ' <span class="ok" title="Проверенный токен">✓</span>' : ''}</b><small>${usd ? '$' + fmt(usd, usd < 1 ? 6 : 3) : esc(j.jetton.symbol)}</small></div>
+      <div class="right">${hid(fmt(amt))} ${esc(j.jetton.symbol)}<small>${usd ? hid('$' + fmt(amt * usd, 2)) : ''}</small></div></div>`;
   }).join('');
-  return ton + js;
+  return ton + js + (S.loaded && !S.jettons.length ? '<div class="empty">Других токенов пока нет. Сюда же придут USDT и другие токены TON.</div>' : '');
+}
+
+function nftHtml() {
+  if (!S.loaded) return '<div class="empty">Загружаю…</div>';
+  if (!S.nfts.length) return '<div class="empty">NFT пока нет.</div>';
+  const host = S.net === 'testnet' ? 'https://testnet.tonviewer.com/' : 'https://tonviewer.com/';
+  return `<div class="nfts">${S.nfts.map(n => {
+    const pr = (n.previews || []).find(p => p.resolution === '500x500') || (n.previews || [])[0];
+    const img = safeImg(pr?.url);
+    const name = n.metadata?.name || n.dns || 'Без названия';
+    return `<a class="nft" href="${host}${esc(n.address)}" target="_blank" rel="noopener noreferrer">
+      <div class="nft-img">${img ? `<img src="${img}" alt="" loading="lazy">` : '◇'}</div>
+      <b>${esc(name)}</b><small>${esc(n.collection?.name || '')}</small></a>`;
+  }).join('')}</div>`;
 }
 
 function historyHtml() {
   if (!S.loaded) return '<div class="empty">Загружаю…</div>';
   if (!S.events.length) return '<div class="empty">Пока нет операций. Нажми «Получить», чтобы пополнить кошелёк.</div>';
-  return S.events.map(e => {
+  return S.events.map((e, idx) => {
     const a = e.actions?.[0]; if (!a) return '';
     const when = new Date(e.timestamp * 1000).toLocaleString('ru', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
     const pend = e.in_progress ? ' · в обработке' : '';
@@ -312,26 +391,94 @@ function historyHtml() {
       amount = `${incoming ? '+' : '−'}${fmt(val)} ${esc(sym)}`;
       sub = (incoming ? 'от ' : 'кому ') + otherAddr + (t.comment ? ' · «' + t.comment + '»' : '');
     }
-    return `<div class="item"><div class="ico ${cls === 'plus' ? 'in' : cls === 'minus' ? 'out' : ''}">${dir}</div>
+    return `<div class="item ev" data-i="${idx}"><div class="ico ${cls === 'plus' ? 'in' : cls === 'minus' ? 'out' : ''}">${dir}</div>
       <div class="mid"><b>${esc(title)}${esc(pend + fail)}</b><small>${esc(sub)}</small></div>
-      <div class="right"><span class="${cls}">${amount}</span><small>${esc(when)}</small></div></div>`;
+      <div class="right"><span class="${cls}">${S.hide ? '••••' : amount}</span><small>${esc(when)}</small></div></div>`;
   }).join('');
 }
 
-V.receive = () => {
-  const link = `ton://transfer/${S.addr}`;
-  let svg = '';
-  if (window.qrcode) { const q = qrcode(0, 'M'); q.addData(link); q.make(); svg = q.createSvgTag({ cellSize: 8, margin: 0, scalable: true }); }
+function friendly(raw, bounce) {
+  try { return new TW.utils.Address(raw).toString(true, true, bounce, S.net === 'testnet'); } catch (e) { return raw; }
+}
+
+V.tx = e => {
+  if (!e) return render('home');
+  const a = e.actions?.[0] || {}, t = a.TonTransfer || a.JettonTransfer;
+  const incoming = t && (t.recipient?.address || '').toLowerCase() === S.raw;
+  const host = S.net === 'testnet' ? 'https://testnet.tonviewer.com/' : 'https://tonviewer.com/';
+  const when = new Date(e.timestamp * 1000).toLocaleString('ru', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const fee = !incoming && Number(e.extra) < 0 ? -Number(e.extra) / 1e9 : 0;
+  let amountLine = '', otherLbl = '', other = null;
+  if (t) {
+    const dec = a.TonTransfer ? 9 : (t.jetton?.decimals ?? 9), sym = a.TonTransfer ? 'TON' : (t.jetton?.symbol || '');
+    amountLine = `${incoming ? '+' : '−'}${fmt(Number(t.amount) / 10 ** dec, dec)} ${sym}`;
+    other = incoming ? t.sender : t.recipient; otherLbl = incoming ? 'Отправитель' : 'Получатель';
+  }
+  const otherAddr = other?.address ? friendly(other.address, !other.is_wallet) : '';
+  const status = e.in_progress ? 'в обработке' : a.status === 'ok' ? 'выполнено' : 'ошибка';
   app.innerHTML = `<div class="view">
     <button class="back" id="b-back">← назад</button>
-    <h2>Получить TON</h2>
-    <p class="muted">Отсканируй QR в другом кошельке или отправь адрес. Сюда можно присылать TON и токены сети TON${S.net === 'testnet' ? ' (только тестовая сеть!)' : ''}.</p>
-    <div class="qr">${svg}</div>
-    <div class="addr-full">${esc(S.addr)}</div>
-    <button class="btn primary" id="b-copy">Скопировать адрес</button>
+    <div class="tx-head">
+      <div class="ico big ${t ? (incoming ? 'in' : 'out') : ''}">${t ? (incoming ? '↓' : '↑') : '•'}</div>
+      <h2>${t ? (incoming ? 'Получено' : 'Отправлено') : esc(a.simple_preview?.name || a.type || 'Операция')}</h2>
+      ${amountLine ? `<div class="tx-amt ${incoming ? 'plus' : 'minus'}">${esc(amountLine)}</div>` : `<p class="muted">${esc(a.simple_preview?.description || '')}</p>`}
+    </div>
+    <div class="sum">
+      <div><span>Статус</span><span>${status}</span></div>
+      <div><span>Дата</span><span>${esc(when)}</span></div>
+      ${otherAddr ? `<div><span>${otherLbl}</span><span class="copyable" data-copy="${esc(otherAddr)}">${other?.name ? esc(other.name) + '<br>' : ''}${esc(otherAddr)} ⧉</span></div>` : ''}
+      ${t?.comment ? `<div><span>Комментарий</span><span>${esc(t.comment)}</span></div>` : ''}
+      ${fee ? `<div><span>Комиссия</span><span>${fmt(fee, 6)} TON</span></div>` : ''}
+    </div>
+    <div class="row">
+      ${otherAddr && incoming === false ? `<button class="btn" id="b-again">Отправить ещё</button>` : ''}
+      <a class="btn" href="${host}transaction/${esc(e.event_id)}" target="_blank" rel="noopener noreferrer">В обозревателе ↗</a>
+    </div>
   </div>`;
   $('#b-back').onclick = () => render('home');
+  app.querySelectorAll('[data-copy]').forEach(el => el.onclick = () => copy(el.dataset.copy, 'Адрес скопирован ✓'));
+  const again = $('#b-again');
+  if (again) again.onclick = () => { S.draft = { asset: a.JettonTransfer ? t.jetton?.address : 'TON', to: otherAddr }; render('send'); };
+};
+
+/* недавние получатели — из истории исходящих */
+function recents() {
+  const seen = new Set(), out = [];
+  for (const e of S.events) {
+    const a = e.actions?.[0], t = a && (a.TonTransfer || a.JettonTransfer);
+    if (!t || (t.recipient?.address || '').toLowerCase() === S.raw || !t.recipient?.address) continue;
+    const addr = friendly(t.recipient.address, !t.recipient.is_wallet);
+    if (seen.has(addr)) continue; seen.add(addr);
+    out.push({ addr, name: t.recipient.name || short(addr) });
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+V.receive = () => {
+  app.innerHTML = `<div class="view">
+    <button class="back" id="b-back">← назад</button>
+    <h2>Получить</h2>
+    <p class="muted">Отсканируй QR в другом кошельке или отправь адрес. Сюда можно присылать TON, USDT и любые токены сети TON${S.net === 'testnet' ? ' (только тестовая сеть!)' : ''}.</p>
+    <div class="qr" id="qr"></div>
+    <div class="addr-full" id="addr">${esc(S.addr)}</div>
+    <label class="field"><small class="lbl">Запросить сумму в TON (необязательно)</small><input id="amt" inputmode="decimal" placeholder="например 5"></label>
+    <div class="row"><button class="btn primary" id="b-copy">Скопировать адрес</button><button class="btn" id="b-link">Ссылка на оплату</button></div>
+  </div>`;
+  const link = () => {
+    const v = $('#amt').value.trim().replace(',', '.');
+    return `ton://transfer/${S.addr}` + (/^\d+(\.\d{1,9})?$/.test(v) && +v > 0 ? `?amount=${TW.utils.toNano(v).toString()}` : '');
+  };
+  const draw = () => {
+    if (!window.qrcode) return;
+    const q = qrcode(0, 'M'); q.addData(link()); q.make();
+    $('#qr').innerHTML = q.createSvgTag({ cellSize: 8, margin: 0, scalable: true });
+  };
+  draw();
+  $('#amt').oninput = draw;
+  $('#b-back').onclick = () => render('home');
   $('#b-copy').onclick = () => copy(S.addr, 'Адрес скопирован ✓');
+  $('#b-link').onclick = () => copy(link().replace('ton://', 'https://app.tonkeeper.com/'), 'Ссылка скопирована ✓');
 };
 
 /* ---------- активы и переводы ---------- */
@@ -382,7 +529,8 @@ V.send = preset => {
         <span class="ico sm">${safeImg(x.image) ? `<img src="${safeImg(x.image)}" alt="">` : x.id === 'TON' ? '◆' : esc(x.symbol[0])}</span>
         <span><b>${esc(x.symbol)}</b><small>${fmt(x.balance)}</small></span></button>`).join('')}</div>
     </div>
-    <label class="field"><small class="lbl">Адрес получателя</small><input id="to" value="${esc(d.to || '')}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="UQ… или EQ…"></label>
+    <label class="field"><small class="lbl">Адрес получателя <button type="button" id="b-paste" style="color:var(--acc);margin-left:6px">вставить</button></small><input id="to" value="${esc(d.to || '')}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="UQ… или EQ…"></label>
+    ${recents().length ? `<div class="recents"><small class="lbl">Недавние</small>${recents().map(r => `<button type="button" class="chip-btn" data-to="${esc(r.addr)}">${esc(r.name)}</button>`).join('')}</div>` : ''}
     <label class="field"><small class="lbl">Сумма, ${esc(cur.symbol)} · доступно ${fmt(cur.balance, cur.decimals)} <button type="button" id="b-max" style="color:var(--acc);margin-left:6px">всё</button></small><input id="amt" inputmode="decimal" value="${esc(d.amount || '')}" placeholder="0"></label>
     <label class="field"><small class="lbl">Комментарий (необязательно, виден всем)</small><input id="cmt" value="${esc(d.comment || '')}" maxlength="120"></label>
     ${cur.id !== 'TON' ? `<p class="muted" style="font-size:13px">Для перевода ${esc(cur.symbol)} нужно ~${JETTON_GAS} TON на балансе. Реально спишется намного меньше, остальное сразу вернётся.</p>` : ''}
@@ -394,6 +542,8 @@ V.send = preset => {
   app.querySelectorAll('.asset').forEach(b => b.onclick = () => { S.draft = { ...keep(), amount: '', asset: b.dataset.id }; V.send(); });
   $('#b-back').onclick = () => { S.draft = null; render('home'); };
   $('#amt').oninput = () => { all = false; };
+  app.querySelectorAll('[data-to]').forEach(b => b.onclick = () => { $('#to').value = b.dataset.to; $('#amt').focus(); });
+  $('#b-paste').onclick = async () => { try { $('#to').value = (await navigator.clipboard.readText()).trim(); } catch (e) { toast('Браузер не дал прочитать буфер. Вставь вручную'); } };
   $('#b-max').onclick = () => {
     $('#amt').value = cur.id === 'TON' ? String(cur.balance) : (cur.units ? String(Number(cur.units) / 10 ** cur.decimals) : '0');
     all = cur.id === 'TON';
@@ -468,7 +618,7 @@ async function estimateFee(d) {
   const boc = TW.utils.bytesToBase64(await q.toBoc(false));
   const need = d.asset === 'TON' ? +d.amount : +JETTON_GAS;
   const balance = Math.round((d.all ? S.balance : Math.max(S.balance, need + 1)) * 1e9);
-  const r = await fetch(api() + '/v2/wallet/emulate', {
+  const r = await fetchRetry(api() + '/v2/wallet/emulate', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ boc, params: [{ address: S.raw, balance }] })
   });
@@ -491,7 +641,7 @@ async function sendNow() {
     const cell = await buildTransfer(d, S.keyPair.secretKey, seqno);
     const boc = TW.utils.bytesToBase64(await cell.toBoc(false));
     st('Отправляю в сеть');
-    const r = await fetch(api() + '/v2/blockchain/message', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ boc }) });
+    const r = await fetchRetry(api() + '/v2/blockchain/message', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ boc }) });
     if (!r.ok) throw new Error('Сеть отклонила перевод (' + r.status + ')');
     st('Жду подтверждения сети (обычно 5–15 секунд)');
     let done = false;
@@ -522,7 +672,7 @@ V.settings = () => {
       <button class="setting" id="b-lock"><span>Заблокировать</span><span class="muted">→</span></button>
       <button class="setting" id="b-del"><span style="color:var(--down)">Удалить кошелёк с устройства</span><span class="muted">→</span></button>
     </div>
-    <p class="muted" style="font-size:13px">Кошелёк автоматически блокируется через 15 минут без действий. Тип кошелька: v4R2.</p>
+    <p class="muted" style="font-size:13px">Кошелёк автоматически блокируется через 15 минут без действий. Тип кошелька: ${S.ver || 'v4R2'}.</p>
   </div>`;
   $('#b-back').onclick = () => render('home');
   $('#b-net').onclick = () => { switchNet(); render('settings'); refresh(); };
@@ -568,5 +718,5 @@ if (!TW || !MN || !window.crypto?.subtle) {
 }
 if (location.hostname === 'localhost') window.__vxw = { S, refresh, render };
 render(loadStore() ? 'unlock' : 'welcome');
-setInterval(() => { if (S.view === 'home' && S.keyPair) refresh(); }, 20000);
+setInterval(() => { if (S.view === 'home' && S.keyPair) refresh(); }, 30000);
 })();

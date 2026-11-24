@@ -3,8 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https: data:; connect-src https://tonapi.io https://testnet.tonapi.io https://api.coingecko.com; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' https: data:; connect-src https://tonapi.io https://testnet.tonapi.io https://api.coingecko.com; manifest-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0c0d0c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="vexelele">
 <title>vexelele wallet</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;800&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -83,6 +90,34 @@
   .plus{color:var(--up)} .minus{color:var(--down)}
   .empty{color:var(--muted);text-align:center;padding:30px 0;font-size:14px}
 
+  .bal-top{display:flex;justify-content:space-between;align-items:flex-start}
+  .bal-tools{display:flex;gap:4px}
+  .bal-tools button{width:34px;height:34px;border:1px solid var(--line);color:var(--muted);font-size:16px;display:grid;place-items:center}
+  .bal-tools button:hover{color:var(--acc);border-color:var(--acc)}
+  .spinning{animation:sp .8s linear infinite}
+  .bal-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:16px;flex-wrap:wrap}
+  .bal-foot .addr-chip{margin-top:0}
+  .bal-foot small{font-family:var(--mono);font-size:11px}
+  .pill{display:inline-block;font-size:11px;border:1px solid currentColor;padding:2px 8px;margin-left:6px;vertical-align:1px}
+  .ok{color:var(--up);font-size:12px}
+  .item.ev{cursor:pointer;transition:background .15s}
+  .item.ev:hover{background:var(--panel)}
+  .nfts{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;padding-top:14px}
+  .nft{border:1px solid var(--line);display:flex;flex-direction:column;transition:.15s;min-width:0}
+  .nft:hover{border-color:var(--acc)}
+  .nft-img{aspect-ratio:1;max-width:100%;background:var(--panel2);display:grid;place-items:center;color:var(--muted);font-size:28px;overflow:hidden}
+  .nft-img img{width:100%;height:100%;object-fit:cover}
+  .nft b{font-size:13px;font-weight:500;padding:8px 10px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .nft small{font-size:11px;color:var(--muted);padding:0 10px 10px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tx-head{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:10px 0}
+  .ico.big{width:64px;height:64px;font-size:28px}
+  .tx-amt{font-family:var(--display);font-size:30px;font-weight:500}
+  .copyable{cursor:pointer}
+  .copyable:hover{color:var(--acc)}
+  .recents{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:-8px}
+  .recents .lbl{margin:0 4px 0 0}
+  .chip-btn{font-family:var(--mono);font-size:12px;border:1px solid var(--line);padding:6px 10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip-btn:hover{border-color:var(--acc);color:var(--acc)}
   .item.tap{cursor:pointer;transition:background .15s}
   .item.tap:hover{background:var(--panel)}
   .assets{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
