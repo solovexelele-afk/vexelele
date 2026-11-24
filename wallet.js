@@ -269,21 +269,22 @@ function renderHome() {
     <div class="list" id="list"></div>
   </div>`;
   $('#b-addr').onclick = () => copy(S.addr, 'Адрес скопирован ✓');
-  $('#b-send').onclick = () => render('send');
+  $('#b-send').onclick = () => { S.draft = null; render('send'); };
   $('#b-recv').onclick = () => render('receive');
   $('#b-set').onclick = () => render('settings');
   app.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; renderHome(); });
   $('#list').innerHTML = S.tab === 'tokens' ? tokensHtml() : historyHtml();
+  app.querySelectorAll('.item.tap').forEach(el => el.onclick = () => { S.draft = null; render('send', el.dataset.asset); });
 }
 V.home = renderHome;
 
 function tokensHtml() {
-  const ton = `<div class="item"><div class="ico" style="background:#0098ea">◆</div><div class="mid"><b>Toncoin</b><small>TON</small></div>
+  const ton = `<div class="item tap" data-asset="TON"><div class="ico" style="background:#0098ea">◆</div><div class="mid"><b>Toncoin</b><small>TON</small></div>
     <div class="right">${fmt(S.balance)}<small>${S.rate.usd ? '$' + fmt(S.balance * S.rate.usd, 2) : ''}</small></div></div>`;
   const js = S.jettons.map(j => {
     const d = j.jetton.decimals ?? 9, amt = Number(j.balance) / 10 ** d, usd = j.price?.prices?.USD;
     const img = safeImg(j.jetton.image);
-    return `<div class="item"><div class="ico">${img ? `<img src="${img}" alt="" loading="lazy">` : esc((j.jetton.symbol || '?')[0])}</div>
+    return `<div class="item tap" data-asset="${esc(j.jetton.address)}"><div class="ico">${img ? `<img src="${img}" alt="" loading="lazy">` : esc((j.jetton.symbol || '?')[0])}</div>
       <div class="mid"><b>${esc(j.jetton.name)}</b><small>${esc(j.jetton.symbol)}</small></div>
       <div class="right">${fmt(amt)}<small>${usd ? '$' + fmt(amt * usd, 2) : ''}</small></div></div>`;
   }).join('');
@@ -333,63 +334,119 @@ V.receive = () => {
   $('#b-copy').onclick = () => copy(S.addr, 'Адрес скопирован ✓');
 };
 
-V.send = () => {
-  const d = S.draft || {};
-  const max = Math.max(0, S.balance - 0.02);
+/* ---------- активы и переводы ---------- */
+const JETTON_GAS = '0.05';   // уходит на газ токен-перевода, неизрасходованное возвращается
+function assets() {
+  return [{ id: 'TON', symbol: 'TON', name: 'Toncoin', balance: S.balance, decimals: 9, image: '' }]
+    .concat(S.jettons.map(j => ({
+      id: j.jetton.address, symbol: j.jetton.symbol || '?', name: j.jetton.name || '', decimals: j.jetton.decimals ?? 9,
+      balance: Number(j.balance) / 10 ** (j.jetton.decimals ?? 9), units: j.balance,
+      image: j.jetton.image, wallet: j.wallet_address?.address
+    })));
+}
+function toUnits(str, dec) {
+  const [i, f = ''] = str.split('.');
+  return new TW.utils.BN((i + f.padEnd(dec, '0').slice(0, dec)).replace(/^0+(?=\d)/, ''));
+}
+async function buildTransfer(d, secretKey, seqno) {
+  if (d.asset === 'TON') {
+    return S.wallet.methods.transfer({
+      secretKey, toAddress: d.to, amount: d.all ? 0 : TW.utils.toNano(d.amount),
+      seqno, payload: d.comment || '', sendMode: d.all ? 128 : 3   // 128 = отправить весь баланс, комиссия из него
+    }).getQuery();
+  }
+  const a = assets().find(x => x.id === d.asset);
+  const C = TW.boc.Cell, body = new C();
+  body.bits.writeUint(0x0f8a7ea5, 32);                 // jetton transfer
+  body.bits.writeUint(0, 64);                          // query_id
+  body.bits.writeCoins(toUnits(d.amount, a.decimals));
+  body.bits.writeAddress(new TW.utils.Address(d.to)); // получатель
+  body.bits.writeAddress(S.addrObj);                   // сдача газа возвращается мне
+  body.bits.writeBit(0);                               // без custom_payload
+  body.bits.writeCoins(new TW.utils.BN(1));            // 1 нанотон: минимум, чтобы получатель увидел перевод
+  if (d.comment) { const cm = new C(); cm.bits.writeUint(0, 32); cm.bits.writeString(d.comment); body.bits.writeBit(1); body.refs.push(cm); }
+  else body.bits.writeBit(0);
+  const jw = new TW.utils.Address(a.wallet).toString(true, true, true, S.net === 'testnet');
+  return S.wallet.methods.transfer({ secretKey, toAddress: jw, amount: TW.utils.toNano(JETTON_GAS), seqno, payload: body, sendMode: 3 }).getQuery();
+}
+
+V.send = preset => {
+  const d = S.draft || { asset: preset || 'TON' };
+  const list = assets();
+  const cur = list.find(x => x.id === d.asset) || list[0];
   app.innerHTML = `<div class="view">
     <button class="back" id="b-back">← назад</button>
-    <h2>Отправить TON</h2>
+    <h2>Отправить</h2>
+    <div class="field"><small class="lbl">Что отправить</small>
+      <div class="assets">${list.map(x => `<button type="button" class="asset ${x.id === cur.id ? 'on' : ''}" data-id="${esc(x.id)}">
+        <span class="ico sm">${safeImg(x.image) ? `<img src="${safeImg(x.image)}" alt="">` : x.id === 'TON' ? '◆' : esc(x.symbol[0])}</span>
+        <span><b>${esc(x.symbol)}</b><small>${fmt(x.balance)}</small></span></button>`).join('')}</div>
+    </div>
     <label class="field"><small class="lbl">Адрес получателя</small><input id="to" value="${esc(d.to || '')}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="UQ… или EQ…"></label>
-    <label class="field"><small class="lbl">Сумма, TON · доступно ${fmt(S.balance)} <button type="button" id="b-max" style="color:var(--acc);margin-left:6px">макс</button></small><input id="amt" inputmode="decimal" value="${esc(d.amount || '')}" placeholder="0"></label>
+    <label class="field"><small class="lbl">Сумма, ${esc(cur.symbol)} · доступно ${fmt(cur.balance, cur.decimals)} <button type="button" id="b-max" style="color:var(--acc);margin-left:6px">всё</button></small><input id="amt" inputmode="decimal" value="${esc(d.amount || '')}" placeholder="0"></label>
     <label class="field"><small class="lbl">Комментарий (необязательно, виден всем)</small><input id="cmt" value="${esc(d.comment || '')}" maxlength="120"></label>
+    ${cur.id !== 'TON' ? `<p class="muted" style="font-size:13px">Для перевода ${esc(cur.symbol)} нужно ~${JETTON_GAS} TON на балансе. Реально спишется намного меньше, остальное сразу вернётся.</p>` : ''}
     <div class="err" id="err"></div>
     <button class="btn primary" id="b-next">Далее</button>
   </div>`;
+  let all = !!d.all;
+  const keep = () => ({ to: $('#to').value.trim(), amount: $('#amt').value.trim(), comment: $('#cmt').value });
+  app.querySelectorAll('.asset').forEach(b => b.onclick = () => { S.draft = { ...keep(), amount: '', asset: b.dataset.id }; V.send(); });
   $('#b-back').onclick = () => { S.draft = null; render('home'); };
-  $('#b-max').onclick = () => { $('#amt').value = max > 0 ? +max.toFixed(4) : 0; };
+  $('#amt').oninput = () => { all = false; };
+  $('#b-max').onclick = () => {
+    $('#amt').value = cur.id === 'TON' ? String(cur.balance) : (cur.units ? String(Number(cur.units) / 10 ** cur.decimals) : '0');
+    all = cur.id === 'TON';
+  };
   $('#b-next').onclick = () => {
-    const to = $('#to').value.trim(), amount = $('#amt').value.trim().replace(',', '.'), comment = $('#cmt').value;
+    const { to, comment } = keep(), amount = $('#amt').value.trim().replace(',', '.');
     const err = m => { $('#err').textContent = m; };
     if (!TW.utils.Address.isValid(to)) return err('Неверный адрес. Проверь, что это адрес в сети TON.');
     const A = new TW.utils.Address(to);
     if (A.isUserFriendly && A.isTestOnly !== (S.net === 'testnet')) return err(S.net === 'testnet' ? 'Это адрес основной сети, а кошелёк в тестовой.' : 'Это адрес тестовой сети. В основной сети на него отправлять нельзя.');
     if (A.toString(false).toLowerCase() === S.raw) return err('Это твой собственный адрес.');
-    const n = Number(amount);
-    if (!/^\d+(\.\d{1,9})?$/.test(amount) || !(n > 0)) return err('Введи сумму, например 1.5');
-    if (n > max) return err(`Недостаточно средств. Можно отправить до ${fmt(max)} TON (часть оставляем на комиссию).`);
-    S.draft = { to, amount, comment, bounceable: A.isUserFriendly ? A.isBounceable : true };
+    const re = new RegExp(`^\\d+(\\.\\d{1,${cur.decimals}})?$`);
+    if (!re.test(amount) || !(Number(amount) > 0)) return err(`Введи сумму, например 1.5 (до ${cur.decimals} знаков после точки).`);
+    if (cur.id === 'TON') {
+      if (Number(amount) > cur.balance) return err('Недостаточно TON.');
+    } else {
+      if (toUnits(amount, cur.decimals).gt(new TW.utils.BN(cur.units))) return err(`Недостаточно ${cur.symbol}.`);
+      if (S.balance < +JETTON_GAS) return err(`Нужно хотя бы ${JETTON_GAS} TON на комиссию. Пополни TON.`);
+    }
+    S.draft = { asset: cur.id, symbol: cur.symbol, to, amount, comment, all: all && cur.id === 'TON' && Number(amount) === cur.balance };
     render('confirmSend');
   };
 };
 
 V.confirmSend = () => {
-  const d = S.draft;
-  const fiat = S.rate.uah ? ` (≈ ${fmt(d.amount * S.rate.uah, 2)} ₴)` : '';
+  const d = S.draft, isTon = d.asset === 'TON';
+  const uah = v => S.rate.uah ? ` (≈ ${fmt(v * S.rate.uah, 2)} ₴)` : '';
   app.innerHTML = `<div class="view">
     <button class="back" id="b-back">← изменить</button>
     <h2>Подтверди перевод</h2>
     <div class="sum">
       <div><span>Кому</span><span>${esc(d.to)}</span></div>
-      <div><span>Сумма</span><span>${esc(d.amount)} TON${fiat}</span></div>
+      <div><span>${d.all ? 'Отправляешь' : 'Сумма'}</span><span>${d.all ? 'весь баланс, ' : ''}${esc(d.amount)} ${esc(d.symbol)}${isTon ? uah(+d.amount) : ''}</span></div>
       ${d.comment ? `<div><span>Комментарий</span><span>${esc(d.comment)}</span></div>` : ''}
       <div><span>Комиссия сети</span><span id="fee">считаю…</span></div>
-      <div><span>Всего спишется</span><span id="total">—</span></div>
+      <div><span>${d.all ? 'Получатель получит' : 'Всего спишется'}</span><span id="total">—</span></div>
       <div><span>Сеть</span><span>${S.net}</span></div>
     </div>
     <div class="note">Переводы в блокчейне <b>нельзя отменить</b>. Проверь адрес ещё раз.</div>
     <label class="field"><small class="lbl">Пароль для подтверждения</small><input type="password" id="p" autocomplete="current-password"></label>
     <div class="err" id="err"></div>
-    <button class="btn primary" id="b-go">Отправить ${esc(d.amount)} TON</button>
+    <button class="btn primary" id="b-go">Отправить ${esc(d.amount)} ${esc(d.symbol)}</button>
   </div>`;
   $('#b-back').onclick = () => render('send');
   estimateFee(d).then(fee => {
     if (S.view !== 'confirmSend') return;
-    const total = +d.amount + fee;
-    const uah = v => S.rate.uah ? ` (≈ ${fmt(v * S.rate.uah, 2)} ₴)` : '';
     $('#fee').textContent = `${fmt(fee, 6)} TON${uah(fee)}`;
-    $('#total').textContent = `${fmt(total, 6)} TON${uah(total)}`;
-    if (total > S.balance) { $('#err').textContent = 'С учётом комиссии не хватает средств. Уменьши сумму.'; $('#b-go').disabled = true; }
-  }).catch(() => { if (S.view === 'confirmSend') { $('#fee').textContent = 'обычно 0.002–0.01 TON'; $('#total').textContent = `${esc(d.amount)} TON + комиссия`; } });
+    if (d.all) $('#total').textContent = `${fmt(Math.max(0, +d.amount - fee), 6)} TON`;
+    else if (isTon) $('#total').textContent = `${fmt(+d.amount + fee, 6)} TON${uah(+d.amount + fee)}`;
+    else $('#total').textContent = `${esc(d.amount)} ${d.symbol} + ${fmt(fee, 6)} TON`;
+    const need = isTon ? (d.all ? fee : +d.amount + fee) : Math.max(fee, +JETTON_GAS);
+    if (need > S.balance) { $('#err').textContent = 'С учётом комиссии не хватает TON. Уменьши сумму или нажми «всё».'; $('#b-go').disabled = true; }
+  }).catch(() => { if (S.view === 'confirmSend') { $('#fee').textContent = isTon ? 'обычно 0.0005–0.005 TON' : 'обычно 0.002–0.02 TON'; $('#total').textContent = `${esc(d.amount)} ${esc(d.symbol)} + комиссия`; } });
   $('#b-go').onclick = async () => {
     $('#b-go').disabled = true;
     try { await decryptWords($('#p').value); }
@@ -407,20 +464,20 @@ async function getSeqno() {
    Настоящий ключ для этого не используется и никуда не уходит. */
 async function estimateFee(d) {
   const seqno = await getSeqno();
-  const q = await S.wallet.methods.transfer({
-    secretKey: null, toAddress: d.to, amount: TW.utils.toNano(d.amount),
-    seqno, payload: d.comment || '', sendMode: 3
-  }).getQuery();
+  const q = await buildTransfer(d, null, seqno);
   const boc = TW.utils.bytesToBase64(await q.toBoc(false));
-  const balance = Math.round(Math.max(S.balance, +d.amount + 1) * 1e9);
+  const need = d.asset === 'TON' ? +d.amount : +JETTON_GAS;
+  const balance = Math.round((d.all ? S.balance : Math.max(S.balance, need + 1)) * 1e9);
   const r = await fetch(api() + '/v2/wallet/emulate', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ boc, params: [{ address: S.raw, balance }] })
   });
   if (!r.ok) throw new Error('emulate ' + r.status);
   const j = await r.json();
-  const extra = Number(j.event?.extra);
+  let extra = Number(j.event?.extra);
   if (!Number.isFinite(extra)) throw new Error('no fee');
+  // для «весь баланс» extra включает отправленную сумму — берём комиссию из трейса
+  if (d.all) extra = -Number(j.trace?.transaction?.total_fees || 0);
   return Math.max(0, -extra) / 1e9;
 }
 
@@ -431,11 +488,7 @@ async function sendNow() {
   try {
     const raw = encodeURIComponent(S.raw);
     const seqno = await getSeqno();
-    const tr = S.wallet.methods.transfer({
-      secretKey: S.keyPair.secretKey, toAddress: d.to, amount: TW.utils.toNano(d.amount),
-      seqno, payload: d.comment || '', sendMode: 3
-    });
-    const cell = await tr.getQuery();
+    const cell = await buildTransfer(d, S.keyPair.secretKey, seqno);
     const boc = TW.utils.bytesToBase64(await cell.toBoc(false));
     st('Отправляю в сеть');
     const r = await fetch(api() + '/v2/blockchain/message', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ boc }) });
@@ -449,7 +502,7 @@ async function sendNow() {
     S.draft = null;
     app.innerHTML = `<div class="view status"><div class="big">${done ? '✓' : '…'}</div>
       <h2>${done ? 'Отправлено' : 'Перевод отправлен в сеть'}</h2>
-      <p class="muted">${done ? `${esc(d.amount)} TON ушли на ${esc(short(d.to))}.` : 'Подтверждение задерживается. Проверь историю через минуту.'}</p>
+      <p class="muted">${done ? `${esc(d.amount)} ${esc(d.symbol)} ушли на ${esc(short(d.to))}.` : 'Подтверждение задерживается. Проверь историю через минуту.'}</p>
       <button class="btn primary" id="b-home">К кошельку</button></div>`;
     $('#b-home').onclick = () => { render('home'); refresh(); };
   } catch (e) {
